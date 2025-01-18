@@ -1,16 +1,9 @@
 import pandas as pd
 import numpy as np
+import openpyxl
 import streamlit as st
 from datetime import datetime, timedelta
 
-# Verificar e instalar openpyxl se necessário
-def check_openpyxl():
-    try:
-        import openpyxl
-    except ImportError:
-        st.error("A biblioteca 'openpyxl' é necessária para ler arquivos Excel. Por favor, instale usando: pip install openpyxl")
-        return False
-    return True
 
 def otimizar_tipos_dados(df, sensor_columns):
     """Otimiza os tipos de dados do DataFrame"""
