@@ -144,9 +144,8 @@ def load_data(uploaded_file):
 
         data.columns = all_columns
         
-        # Exibir amostra
-        #st.write("Visualização das primeiras 20 linhas dos dados:")
-        #st.dataframe(data.head(20))
+        # Garantir que ANO seja inteiro sem decimais
+        data["ANO"] = data["ANO"].astype('int16')
 
         return data
 
