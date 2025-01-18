@@ -12,56 +12,148 @@ def check_openpyxl():
         return False
     return True
 
-# Função para carregar os dados
+def otimizar_tipos_dados(df, sensor_columns):
+    """Otimiza os tipos de dados do DataFrame"""
+    # Otimizar tipos numéricos
+    df["HORA"] = df["HORA"].astype('int32')
+    df["ANO"] = df["ANO"].astype('int16')
+    df["DIAJ"] = df["DIAJ"].astype('int16')
+    
+    # Otimizar colunas de sensores
+    for sensor in sensor_columns:
+        df[sensor] = pd.to_numeric(df[sensor], errors='coerce', downcast='float')
+    
+    return df
+
+def processar_ano(data_ano, sensor_columns, ano):
+    """Processa os dados de um ano específico"""
+    resultados_ano = {}
+    
+    # Filtrar horário e criar cópia otimizada
+    data_filtered = data_ano[
+        (data_ano["HORA"] >= 360) & 
+        (data_ano["HORA"] <= 1080)
+    ].copy()
+    
+    # Tratar valores dos sensores
+    for sensor in sensor_columns:
+        data_filtered[sensor] = data_filtered[sensor].astype(str)
+        data_filtered[sensor] = data_filtered[sensor].replace({
+            '<NA>': '0', 'nan': '0', 'NaN': '0', 'NA': '0'
+        })
+        data_filtered[sensor] = pd.to_numeric(
+            data_filtered[sensor], 
+            errors='coerce'
+        ).fillna(0).clip(lower=0)
+
+    # Converter dia juliano para mês e dia
+    data_filtered[['MES', 'DIA']] = data_filtered.apply(
+        lambda row: pd.Series(dia_juliano_para_mes_dia(row['ANO'], row['DIAJ'])), 
+        axis=1
+    )
+
+    # Processar por mês
+    for mes in sorted(data_filtered["MES"].unique()):
+        resultados_ano[int(mes)] = {}
+        grupo_mes = data_filtered[data_filtered["MES"] == mes]
+        
+        for sensor in sensor_columns:
+            sensor_data = grupo_mes[["DIAJ", "DIA", "HORA", sensor]].copy()
+            
+            # Somatório por hora para cada dia
+            soma_hora = sensor_data.groupby(["DIAJ", "HORA"])[sensor].sum()
+            soma_hora_dict = {}
+            for (diaj, hora), valor in soma_hora.items():
+                if diaj not in soma_hora_dict:
+                    soma_hora_dict[diaj] = {}
+                soma_hora_dict[diaj][hora] = valor
+
+            # Somatório por dia
+            soma_dia = sensor_data.groupby("DIAJ")[sensor].sum()
+            
+            # Somatório do mês
+            soma_mes = soma_dia.sum()
+
+            resultados_ano[int(mes)][sensor] = {
+                "Somatório Hora": soma_hora_dict,
+                "Somatório Dia": soma_dia,
+                "Somatório Mês": soma_mes
+            }
+            
+            # Limpar memória
+            del sensor_data
+    
+    return resultados_ano
+
+def calcular_somatorios(data):
+    """Função principal de cálculo de somatórios"""
+    sensor_columns = [col for col in data.columns if col.startswith('SENSOR')]
+    
+    # Otimizar tipos de dados
+    data = otimizar_tipos_dados(data, sensor_columns)
+    
+    resultados = {}
+    # Processar ano por ano
+    for ano in sorted(data["ANO"].unique()):
+        # Filtrar dados do ano
+        data_ano = data[data["ANO"] == ano].copy()
+        
+        # Processar o ano
+        resultados[int(ano)] = processar_ano(data_ano, sensor_columns, ano)
+        
+        # Limpar memória
+        del data_ano
+        
+    return resultados
+
+@st.cache_data
 def load_data(uploaded_file):
     try:
-        # Verificar se openpyxl está instalado para arquivos Excel
-        if uploaded_file.name.endswith('.xlsx') and not check_openpyxl():
-            return None
-
-        # Tentar carregar o arquivo sem cabeçalho
+        # Definir tipos de dados otimizados para leitura
+        dtype_dict = {
+            'ANO': 'int16',
+            'DIAJ': 'int16',
+            'HORA': 'int32'
+        }
+        
+        # Carregar arquivo com tipos otimizados
         if uploaded_file.name.endswith('.csv'):
-            data = pd.read_csv(uploaded_file, header=None)
+            data = pd.read_csv(uploaded_file, header=None, dtype=dtype_dict)
         elif uploaded_file.name.endswith('.xlsx'):
-            data = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
+            data = pd.read_excel(uploaded_file, header=None, dtype=dtype_dict, engine='openpyxl')
         elif uploaded_file.name.endswith('.dat'):
-            data = pd.read_csv(uploaded_file, sep=r',', header=None)
+            data = pd.read_csv(uploaded_file, sep=r',', header=None, dtype=dtype_dict)
         else:
             st.error("Formato de arquivo não suportado. Use .dat, .csv ou .xlsx.")
             return None
 
-        # Sempre excluir a primeira coluna
+        # Remover primeira coluna
         data = data.iloc[:, 1:]
-
-        # Verificar se a primeira linha é cabeçalho (contém strings)
+        
+        # Remover cabeçalho se existir
         if data.iloc[0].apply(lambda x: isinstance(x, str)).any():
             data = data.iloc[1:].reset_index(drop=True)
 
-        # Definir o cabeçalho fixo base
+        # Definir nomes das colunas
         fixed_columns = ["ANO", "DIAJ", "HORA"]
         sensor_columns = [f"SENSOR{i}" for i in range(1, 11)]
         
-        # Verificar o número de colunas para determinar se tem temperatura
         if len(data.columns) == len(fixed_columns) + len(sensor_columns):
             all_columns = fixed_columns + sensor_columns
         else:
             all_columns = fixed_columns + ["TEMP"] + sensor_columns
 
         if len(data.columns) > len(all_columns):
-            st.warning("O número de colunas no arquivo é maior do que o esperado. Colunas extras serão descartadas.")
             data = data.iloc[:, :len(all_columns)]
         elif len(data.columns) < len(fixed_columns) + len(sensor_columns):
-            st.error(f"O número de colunas no arquivo é menor do que o mínimo esperado ({len(data.columns)} em vez de {len(fixed_columns) + len(sensor_columns)}). Verifique o arquivo.")
+            st.error(f"Número de colunas insuficiente: {len(data.columns)}")
             return None
 
-        # Atualizar os nomes das colunas
         data.columns = all_columns
-
-        # Tratar valores <NA>, NaN e negativos nos sensores
-        for sensor in sensor_columns:
-            data[sensor] = data[sensor].astype(str)  # Converter para string primeiro
-            data[sensor] = data[sensor].replace({'<NA>': '0', 'nan': '0', 'NaN': '0', 'NA': '0'})
-            data[sensor] = pd.to_numeric(data[sensor], errors='coerce').fillna(0)
+        
+        # Exibir amostra
+        #st.write("Visualização das primeiras 20 linhas dos dados:")
+        #st.dataframe(data.head(20))
 
         return data
 
@@ -92,66 +184,6 @@ def dia_juliano_para_mes_dia(ano, diaj):
         st.error(f"Erro na conversão de data juliano: {e}")
         return None, None
 
-# Função para calcular os somatórios
-def calcular_somatorios(data):
-    sensor_columns = [col for col in data.columns if col.startswith('SENSOR')]
-
-    # Tratamento de dados - converter para tipos corretos
-    data["HORA"] = data["HORA"].astype(int)
-    data["ANO"] = data["ANO"].astype(int)
-    data["DIAJ"] = data["DIAJ"].astype(int)
-
-    # Filtrar dados por horário entre 06:00 e 18:00 (360 a 1080 minutos)
-    data_filtered = data[(data["HORA"] >= 360) & (data["HORA"] <= 1080)].copy()
-    
-    # Tratar valores negativos, NaN, NA e <NA> nos sensores
-    for sensor in sensor_columns:
-        # Primeiro, substituir <NA> por NaN
-        data_filtered[sensor] = data_filtered[sensor].replace('<NA>', np.nan)
-        # Converter para numérico, forçando NaN em valores não numéricos
-        data_filtered[sensor] = pd.to_numeric(data_filtered[sensor], errors='coerce')
-        # Substituir valores negativos e NaN por zero
-        data_filtered[sensor] = data_filtered[sensor].fillna(0)
-        data_filtered[sensor] = data_filtered[sensor].replace([np.inf, -np.inf], 0)
-        data_filtered[sensor] = data_filtered[sensor].apply(lambda x: max(0, float(x)))
-
-    # Converter dia juliano para mês e dia
-    data_filtered[['MES', 'DIA']] = data_filtered.apply(
-        lambda row: pd.Series(dia_juliano_para_mes_dia(row['ANO'], row['DIAJ'])), 
-        axis=1
-    )
-
-    resultados = {}
-
-    # Agrupar por ano e mês e depois calcular para cada sensor
-    for ano in data_filtered["ANO"].unique():
-        resultados[int(ano)] = {}
-        grupo_ano = data_filtered[data_filtered["ANO"] == ano]
-        
-        for mes in grupo_ano["MES"].unique():
-            resultados[int(ano)][int(mes)] = {}
-            grupo_mes = grupo_ano[grupo_ano["MES"] == mes]
-            
-            for sensor in sensor_columns:
-                sensor_data = grupo_mes[["DIA", "HORA", sensor]]
-
-                # Somatório por hora
-                soma_hora = sensor_data.groupby("HORA")[sensor].sum()
-
-                # Somatório por dia
-                soma_dia = sensor_data.groupby("DIA")[sensor].sum()
-
-                # Somatório do mês
-                soma_mes = soma_dia.sum()
-
-                resultados[int(ano)][int(mes)][sensor] = {
-                    "Somatório Hora": soma_hora,
-                    "Somatório Dia": soma_dia,
-                    "Somatório Mês": soma_mes
-                }
-
-    return resultados
-
 def minutos_para_hhmm(minutos):
     """Converte minutos em formato HH:MM"""
     horas = int(minutos // 60)
@@ -179,38 +211,65 @@ if data_file is not None:
         # Botão para calcular os somatórios
         if st.button("Calcular Somatórios"):
             try:
-                resultados = calcular_somatorios(data)
+                with st.spinner('Calculando somatórios... Por favor, aguarde.'):
+                    resultados = calcular_somatorios(data)
 
                 # Exibir resultados formatados em duas colunas
                 col_clone1, col_clone2 = st.columns(2)
                 
-                for clone, sensors in {"CLONE1": ["SENSOR1", "SENSOR2", "SENSOR3", "SENSOR4", "SENSOR5"],
-                                     "CLONE2": ["SENSOR6", "SENSOR7", "SENSOR8", "SENSOR9", "SENSOR10"]}.items():
+                clones_sensores = {
+                    "CLONE1": ["SENSOR1", "SENSOR2", "SENSOR3", "SENSOR4", "SENSOR5"],
+                    "CLONE2": ["SENSOR6", "SENSOR7", "SENSOR8", "SENSOR9", "SENSOR10"]
+                }
+
+                for clone, sensors in clones_sensores.items():
                     with (col_clone1 if clone == "CLONE1" else col_clone2):
                         st.subheader(f"{clone}")
-                        for ano, meses in resultados.items():
-                            st.write(f"Ano: {ano}")
-                            for mes, sensores in meses.items():
-                                st.write(f"Mês: {mes}")
+                        
+                        # Processar ano por ano
+                        for ano in sorted(resultados.keys()):
+                            st.markdown(f"### Ano: {ano}")
+                            
+                            # Processar mês por mês
+                            for mes in sorted(resultados[ano].keys()):
+                                st.markdown(f"#### Mês: {mes}")
+                                
+                                # Processar cada sensor do clone
                                 for sensor in sensors:
-                                    if sensor in sensores:
-                                        st.write(f"\n{sensor}")
-                                        # Primeiro o somatório do mês
-                                        st.write("Somatório do Mês:")
-                                        st.text(f"{sensores[sensor]['Somatório Mês']:.2f}")
+                                    if sensor in resultados[ano][mes]:
+                                        dados_sensor = resultados[ano][mes][sensor]
                                         
-                                        # Depois o somatório por dia
-                                        st.write("Somatório por Dia:")
-                                        st.dataframe(sensores[sensor]["Somatório Dia"].round(2))
-                                        
-                                        # Por último o somatório por hora
-                                        st.write("Somatório por Hora:")
-                                        # Converter o índice de minutos para HH:MM
-                                        soma_hora = sensores[sensor]["Somatório Hora"].copy()
-                                        soma_hora.index = [minutos_para_hhmm(m) for m in soma_hora.index]
-                                        st.dataframe(soma_hora.round(2))
-                                        
-                                        st.write("---")  # Separador entre sensores
+                                        # Criar expander para cada sensor
+                                        with st.expander(f"{sensor} - Total do Mês: {dados_sensor['Somatório Mês']:.2f}"):
+                                            # Exibir somatórios por dia
+                                            st.write("Somatórios Diários:")
+                                            
+                                            # Organizar dias em ordem
+                                            for diaj in sorted(dados_sensor['Somatório Dia'].index):
+                                                soma_dia = dados_sensor['Somatório Dia'][diaj]
+                                                
+                                                # Criar expander para cada dia
+                                                with st.expander(f"Dia {diaj}: {soma_dia:.2f}"):
+                                                    if diaj in dados_sensor['Somatório Hora']:
+                                                        # Organizar horas em ordem
+                                                        st.write("Somatórios por Hora:")
+                                                        horas_ordenadas = sorted(
+                                                            dados_sensor['Somatório Hora'][diaj].items()
+                                                        )
+                                                        
+                                                        # Criar DataFrame para exibição organizada
+                                                        dados_hora = pd.DataFrame(
+                                                            [(minutos_para_hhmm(hora), valor) 
+                                                             for hora, valor in horas_ordenadas],
+                                                            columns=['Hora', 'Valor']
+                                                        )
+                                                        st.dataframe(
+                                                            dados_hora.set_index('Hora'),
+                                                            use_container_width=True
+                                                        )
+                                
+                                st.markdown("---")  # Separador entre meses
 
             except Exception as e:
-                st.error(f"Erro ao calcular somatórios: {e}")
+                st.error(f"Erro ao exibir resultados: {str(e)}")
+                st.exception(e)  # Isso mostrará o traceback completo em desenvolvimento
